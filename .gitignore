@@ -1,0 +1,18 @@
+# Credentials — NEVER commit
+api/config/firebase-service-account.json
+api/config/config.php
+
+# Uploads
+api/storage/ids/*
+api/storage/avatars/*
+api/storage/posts/*
+api/storage/logs/*
+!api/storage/.gitkeep
+
+# Composer / vendor
+api/vendor/
+
+# OS junk
+.DS_Store
+Thumbs.db
+*.log

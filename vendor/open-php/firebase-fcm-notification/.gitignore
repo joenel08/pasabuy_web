@@ -1,0 +1,23 @@
+# Dependencies
+# We ignore vendor/ because these are installed via composer.json
+vendor/
+
+# Security - CRITICAL
+# Never commit credentials or tokens to Git! Each user must provide their own.
+credentials.json
+token.json
+service_account.json
+
+# Composer Lock
+# For libraries, we often ignore this to ensure we test against latest dependency versions
+# However, for applications it's recommended to commit it. 
+# Since this is a library, ignoring it is acceptable/common.
+composer.lock
+
+# System & IDE Files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

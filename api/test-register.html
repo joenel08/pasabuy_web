@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html><body>
+<h3>Register Test</h3>
+<pre id="out">Sending…</pre>
+<script>
+fetch('/pasabuy/api/auth/register', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({
+    email: 'test1@example.com',
+    password: 'password123',
+    role: 'buyer'
+  })
+})
+.then(r => r.text())
+.then(t => document.getElementById('out').textContent = t);
+</script>
+</body></html>
