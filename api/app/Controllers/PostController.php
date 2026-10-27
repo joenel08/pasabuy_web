@@ -222,6 +222,20 @@ class PostController
             Response::error('Your account is not verified yet', 403);
         }
 
+        // ---- Debt block check ----
+        $debt = \App\Services\UserDebt::summary((int) $auth['id']);
+        if ($debt['is_blocked']) {
+            Response::error(
+                'Your account is on hold. ' . $debt['block_reason'] . '. Please contact support to settle your outstanding fees.',
+                402,  // Payment Required
+                [
+                    'unpaid_total' => $debt['unpaid_total'],
+                    'unpaid_count' => $debt['unpaid_count'],
+                    'oldest_at'    => $debt['oldest_unpaid_at'],
+                ]
+            );
+        }
+
         $title       = trim((string) $request->input('title', ''));
         $description = trim((string) $request->input('description', ''));
         $type        = (string) $request->input('type', 'offer');

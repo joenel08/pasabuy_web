@@ -103,3 +103,5 @@ $router->get('/me/stats/by-item', [TransactionController::class, 'myItemsBreakdo
 $router->post  ('/conversations/{id}/pin',   [ConversationController::class, 'pin']);
 $router->post  ('/conversations/{id}/unpin', [ConversationController::class, 'unpin']);
 $router->delete('/conversations/{id}',       [ConversationController::class, 'destroy']);
+
+$router->get('/me/fees', [TransactionController::class, 'myFees']);

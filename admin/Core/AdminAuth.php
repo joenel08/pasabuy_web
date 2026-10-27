@@ -46,7 +46,7 @@ class AdminAuth
     {
         $role = self::role();
         $matrix = [
-            'super'     => ['dashboard','analytics','users','kyc','posts','reports','transactions','settings'],
+            'super'     => ['dashboard','analytics','users','kyc','posts','reports','transactions','settings','fees'],
             'kyc'       => ['dashboard','users','kyc'],
             'moderator' => ['dashboard','users','reports'],
             'analytics' => ['dashboard','analytics'],

@@ -7,28 +7,48 @@ use App\Core\Database;
 use App\Core\Notifier;
 use App\Core\Request;
 use App\Core\Response;
+use App\Core\AdminNotifier;
 use App\Models\Conversation;
 use App\Models\Transaction;
 use App\Services\TrendBuilder;
-use App\Core\AdminNotifier;
-
-/** GET /me/stats/trend?range=30d */
+use App\Services\UserDebt;
 
 class TransactionController
 {
-    /** POST /conversations/{id}/deals  */
+    // =================================================================
+    // POST /conversations/{id}/deals
+    // =================================================================
     public function create(Request $request, array $params = []): void
     {
-        $auth = Auth::require($request);
+        $auth   = Auth::require($request);
+        $me     = (int) $auth['id'];
         $convId = (int) ($params['id'] ?? 0);
+
         $conv = Conversation::find($convId);
         if (!$conv) Response::error('Conversation not found', 404);
 
-        $me = (int) $auth['id'];
+        // Authorization first
         if ((int) $conv['buyer_id'] !== $me && (int) $conv['pasabuyer_id'] !== $me) {
             Response::error('Forbidden', 403);
         }
 
+        // Debt check — only blocks the pasabuyer side
+        $isPasabuyer = (int) $conv['pasabuyer_id'] === $me;
+        if ($isPasabuyer) {
+            $debt = UserDebt::summary($me);
+            if ($debt['is_blocked']) {
+                Response::error(
+                    'Your account is on hold. ' . ($debt['block_reason'] ?? 'You have unpaid fees.') . ' Please settle your fees.',
+                    402,
+                    [
+                        'unpaid_total' => $debt['unpaid_total'],
+                        'unpaid_count' => $debt['unpaid_count'],
+                    ]
+                );
+            }
+        }
+
+        // One active deal per conversation
         $existing = Database::pdo()->prepare(
             "SELECT id FROM transactions
              WHERE conversation_id = ? AND status NOT IN ('completed','cancelled')
@@ -43,7 +63,7 @@ class TransactionController
         $price = $request->input('agreed_price');
         $notes = trim((string) $request->input('notes', ''));
 
-        // Handle proof image — accept HEIC/HEIF too
+        // Proof image
         $proofImage = null;
         if (!empty($request->files['proof_image'])) {
             $file = $request->files['proof_image'];
@@ -79,6 +99,7 @@ class TransactionController
         $other = (int) $conv['buyer_id'] === $me
             ? (int) $conv['pasabuyer_id']
             : (int) $conv['buyer_id'];
+
         Notifier::send(
             $other,
             'deal_proposed',
@@ -90,6 +111,9 @@ class TransactionController
         Response::ok(['id' => $id], 'Deal proposed');
     }
 
+    // =================================================================
+    // GET /me/stats/trend
+    // =================================================================
     public function myTrend(Request $request, array $params = []): void
     {
         $auth  = Auth::require($request);
@@ -104,7 +128,9 @@ class TransactionController
         Response::ok($trend);
     }
 
-    /** POST /deals/{id}/accept  */
+    // =================================================================
+    // POST /deals/{id}/accept
+    // =================================================================
     public function accept(Request $request, array $params = []): void
     {
         $auth = Auth::require($request);
@@ -115,6 +141,17 @@ class TransactionController
         }
         if ((int) $tx['proposed_by_user_id'] === (int) $auth['id']) {
             Response::error('You proposed this deal — wait for the other party', 422);
+        }
+
+        // If the acceptor is the pasabuyer, check their debt too
+        if ((int) $tx['pasabuyer_id'] === (int) $auth['id']) {
+            $debt = UserDebt::summary((int) $auth['id']);
+            if ($debt['is_blocked']) {
+                Response::error(
+                    'Your account is on hold. ' . ($debt['block_reason'] ?? 'Unpaid fees.'),
+                    402
+                );
+            }
         }
 
         Transaction::update((int) $tx['id'], [
@@ -133,11 +170,14 @@ class TransactionController
         Response::ok(['status' => 'in_progress'], 'Deal accepted');
     }
 
-    /** POST /deals/{id}/decline  */
+    // =================================================================
+    // POST /deals/{id}/decline
+    // =================================================================
     public function decline(Request $request, array $params = []): void
     {
         $auth = Auth::require($request);
         $tx   = $this->authorize($auth, (int) ($params['id'] ?? 0));
+
         if (!in_array($tx['status'], ['pending', 'in_progress'], true)) {
             Response::error('Deal cannot be declined now', 422);
         }
@@ -160,7 +200,9 @@ class TransactionController
         Response::ok(null, 'Deal cancelled');
     }
 
-    /** POST /deals/{id}/done  */
+    // =================================================================
+    // POST /deals/{id}/done
+    // =================================================================
     public function done(Request $request, array $params = []): void
     {
         $auth = Auth::require($request);
@@ -170,7 +212,7 @@ class TransactionController
             Response::error('Deal is not in progress yet', 422);
         }
 
-        $me = (int) $auth['id'];
+        $me     = (int) $auth['id'];
         $update = ['updated_at' => date('Y-m-d H:i:s')];
 
         if ($me === (int) $tx['buyer_id']) {
@@ -190,7 +232,7 @@ class TransactionController
             $update['status']       = 'completed';
             $update['completed_at'] = date('Y-m-d H:i:s');
 
-            // ---- Compute 2% admin fee ----
+            // Compute 2% admin fee
             $config = require __DIR__ . '/../../config/config.php';
             $rate   = (float) ($config['fees']['admin_rate'] ?? 0.02);
 
@@ -203,20 +245,19 @@ class TransactionController
                 $update['fee_rate']   = $rate;
                 $update['admin_fee']  = $fee;
                 $update['net_payout'] = $net;
+                $update['fee_paid_at'] = null; // explicitly unpaid
 
-                // Log to admin notification ledger
                 Database::pdo()->prepare(
                     "INSERT INTO admin_notifications
                         (type, category, title, body, link, target_type, target_id, created_at)
                      VALUES ('fee_collected', 'transactions',
-                             'Fee collected', ?, '/pasabuy/transactions',
+                             'Fee owed', ?, '/pasabuy/fees',
                              'transaction', ?, NOW())"
                 )->execute([
-                    'Deal #' . $tx['id'] . ' · ₱' . number_format($fee, 2),
+                    'Deal #' . $tx['id'] . ' · ₱' . number_format($fee, 2) . ' owed by pasabuyer',
                     (int) $tx['id'],
                 ]);
             } else {
-                // No agreed price → no fee, but still mark complete
                 $update['fee_rate']   = $rate;
                 $update['admin_fee']  = 0;
                 $update['net_payout'] = 0;
@@ -240,13 +281,15 @@ class TransactionController
         );
 
         Response::ok([
-            'status'      => $update['status'],
-            'admin_fee'   => $update['admin_fee']   ?? null,
-            'net_payout'  => $update['net_payout']  ?? null,
+            'status'     => $update['status'],
+            'admin_fee'  => $update['admin_fee']  ?? null,
+            'net_payout' => $update['net_payout'] ?? null,
         ], 'Updated');
     }
 
-    /** POST /deals/{id}/dispute  */
+    // =================================================================
+    // POST /deals/{id}/dispute
+    // =================================================================
     public function dispute(Request $request, array $params = []): void
     {
         $auth = Auth::require($request);
@@ -262,7 +305,6 @@ class TransactionController
             'updated_at'     => date('Y-m-d H:i:s'),
         ]);
 
-        // Notify admin users
         $admins = Database::pdo()->query(
             "SELECT id FROM users WHERE role = 'admin'"
         )->fetchAll();
@@ -289,7 +331,9 @@ class TransactionController
         Response::ok(null, 'Dispute filed — admin will review.');
     }
 
-    /** GET /me/deals  */
+    // =================================================================
+    // GET /me/deals
+    // =================================================================
     public function myDeals(Request $request, array $params = []): void
     {
         $auth = Auth::require($request);
@@ -303,10 +347,10 @@ class TransactionController
                     buyer.email  AS buyer_email,
                     seller.email AS pasabuyer_email
              FROM transactions t
-             LEFT JOIN posts p      ON p.id = t.post_id
+             LEFT JOIN posts p       ON p.id  = t.post_id
              LEFT JOIN post_items pi ON pi.id = t.item_id
-             LEFT JOIN users buyer  ON buyer.id = t.buyer_id
-             LEFT JOIN users seller ON seller.id = t.pasabuyer_id
+             LEFT JOIN users buyer   ON buyer.id  = t.buyer_id
+             LEFT JOIN users seller  ON seller.id = t.pasabuyer_id
              WHERE t.buyer_id = ? OR t.pasabuyer_id = ?
              ORDER BY t.updated_at DESC
              LIMIT 200"
@@ -314,15 +358,16 @@ class TransactionController
         $stmt->execute([$me, $me]);
 
         $rows = array_map(function ($r) use ($me) {
-            $roleAs = (int) $r['buyer_id'] === $me ? 'buyer' : 'pasabuyer';
+            $roleAs     = (int) $r['buyer_id'] === $me ? 'buyer' : 'pasabuyer';
             $otherEmail = $roleAs === 'buyer' ? $r['pasabuyer_email'] : $r['buyer_email'];
+
             return [
                 'id'                => (int) $r['id'],
                 'conversation_id'   => (int) $r['conversation_id'],
                 'post_id'           => $r['post_id'] ? (int) $r['post_id'] : null,
-                'item_id'           => $r['item_id'] ? (int) $r['item_id'] : null,   // ← ADDED
+                'item_id'           => $r['item_id'] ? (int) $r['item_id'] : null,
                 'post_title'        => $r['post_title'],
-                'item_title'        => $r['item_title'] ?? '',                       // ← ADDED
+                'item_title'        => $r['item_title'] ?? '',
                 'post_type'         => $r['post_type'],
                 'role'              => $roleAs,
                 'other_party_email' => $otherEmail,
@@ -331,6 +376,8 @@ class TransactionController
                 'admin_fee'         => $r['admin_fee'],
                 'net_payout'        => $r['net_payout'],
                 'fee_rate'          => $r['fee_rate'],
+                'fee_paid'          => $r['fee_paid_at'] !== null,
+                'fee_paid_at'       => $r['fee_paid_at'],
                 'currency'          => $r['currency'],
                 'status'            => $r['status'],
                 'buyer_done'        => $r['buyer_done_at'] !== null,
@@ -347,7 +394,9 @@ class TransactionController
         Response::ok(['data' => $rows]);
     }
 
-    /** GET /me/stats  */
+    // =================================================================
+    // GET /me/stats
+    // =================================================================
     public function myStats(Request $request, array $params = []): void
     {
         $auth = Auth::require($request);
@@ -365,7 +414,8 @@ class TransactionController
                     SUM(status = 'cancelled') AS cancelled,
                     COALESCE(SUM(CASE WHEN status='completed' THEN agreed_price END), 0) AS value,
                     COALESCE(SUM(CASE WHEN status='completed' THEN admin_fee END),   0) AS fees_paid,
-                    COALESCE(SUM(CASE WHEN status='completed' THEN net_payout END),  0) AS net_earned
+                    COALESCE(SUM(CASE WHEN status='completed' THEN net_payout END),  0) AS net_earned,
+                    COALESCE(SUM(CASE WHEN status='completed' AND fee_paid_at IS NULL THEN admin_fee END), 0) AS fees_unpaid
                  FROM transactions WHERE $col = ?"
             );
             $stmt->execute([$me]);
@@ -378,6 +428,7 @@ class TransactionController
                 'cancelled'   => (int) $r['cancelled'],
                 'value'       => (float) $r['value'],
                 'fees_paid'   => (float) $r['fees_paid'],
+                'fees_unpaid' => (float) $r['fees_unpaid'],
                 'net_earned'  => (float) $r['net_earned'],
             ];
         }
@@ -385,7 +436,9 @@ class TransactionController
         Response::ok($stats);
     }
 
-    /** GET /me/stats/by-item?range=30d */
+    // =================================================================
+    // GET /me/stats/by-item
+    // =================================================================
     public function myItemsBreakdown(Request $request, array $params = []): void
     {
         $auth  = Auth::require($request);
@@ -431,7 +484,77 @@ class TransactionController
         Response::ok(['data' => $rows, 'range' => $range]);
     }
 
-    // ---------------- helpers ----------------
+    // =================================================================
+    // GET /me/fees — outstanding fees + payment history
+    // =================================================================
+    public function myFees(Request $request, array $params = []): void
+    {
+        $auth = Auth::require($request);
+        $me   = (int) $auth['id'];
+
+        $summary = UserDebt::summary($me);
+
+        $config  = require __DIR__ . '/../../config/config.php';
+        $payment = $config['payment'] ?? [];
+
+        $stmt = Database::pdo()->prepare(
+            "SELECT t.id, t.item_description, t.agreed_price, t.admin_fee,
+                    t.completed_at,
+                    p.title AS post_title,
+                    pi.title AS item_title
+             FROM transactions t
+             LEFT JOIN posts p       ON p.id  = t.post_id
+             LEFT JOIN post_items pi ON pi.id = t.item_id
+             WHERE t.pasabuyer_id = ?
+               AND t.status = 'completed'
+               AND t.fee_paid_at IS NULL
+               AND t.admin_fee > 0
+             ORDER BY t.completed_at ASC"
+        );
+        $stmt->execute([$me]);
+
+        $rows = array_map(fn($r) => [
+            'transaction_id'   => (int) $r['id'],
+            'item_title'       => $r['item_title'] ?? '',
+            'item_description' => $r['item_description'],
+            'post_title'       => $r['post_title'] ?? '',
+            'agreed_price'     => (float) $r['agreed_price'],
+            'admin_fee'        => (float) $r['admin_fee'],
+            'completed_at'     => $r['completed_at'],
+            'days_old'         => (int) floor((time() - strtotime($r['completed_at'])) / 86400),
+        ], $stmt->fetchAll());
+
+        $hist = Database::pdo()->prepare(
+            "SELECT t.id, t.admin_fee, t.fee_paid_at, t.fee_payment_notes
+             FROM transactions t
+             WHERE t.pasabuyer_id = ?
+               AND t.fee_paid_at IS NOT NULL
+             ORDER BY t.fee_paid_at DESC
+             LIMIT 20"
+        );
+        $hist->execute([$me]);
+
+        $history = array_map(fn($r) => [
+            'transaction_id' => (int) $r['id'],
+            'admin_fee'      => (float) $r['admin_fee'],
+            'paid_at'        => $r['fee_paid_at'],
+            'notes'          => $r['fee_payment_notes'] ?? '',
+        ], $hist->fetchAll());
+
+        Response::ok([
+            'summary' => $summary,
+            'items'   => $rows,
+            'history' => $history,
+            'payment' => [
+                'gcash_number' => $payment['gcash_number'] ?? '',
+                'gcash_name'   => $payment['gcash_name']   ?? '',
+            ],
+        ]);
+    }
+
+    // =================================================================
+    // HELPERS
+    // =================================================================
 
     private function authorize(array $auth, int $txId): array
     {

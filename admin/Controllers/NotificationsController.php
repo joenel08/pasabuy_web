@@ -25,7 +25,7 @@ class NotificationsController
              WHERE read_at IS NULL
              GROUP BY category"
         );
-        $byCat = ['users' => 0, 'kyc' => 0, 'posts' => 0, 'reports' => 0, 'transactions' => 0];
+        $byCat = ['users' => 0, 'kyc' => 0, 'posts' => 0, 'reports' => 0, 'transactions' => 0, 'fees' => 0];
         $total = 0;
         foreach ($stmt->fetchAll() as $row) {
             $cat = (string) $row['category'];

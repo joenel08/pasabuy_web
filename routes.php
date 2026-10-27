@@ -15,6 +15,8 @@ use Admin\Controllers\NotificationsController;
 
 use Admin\Controllers\TransactionsController;
 
+use Admin\Controllers\FeesController;
+
 /** @var Admin\Core\Router $router */
 
 // Root → dashboard or login
@@ -92,3 +94,11 @@ $router->get ('/reports/{id}',                  [ReportsController::class, 'show
 $router->post('/reports/{id}/update',           [ReportsController::class, 'update']);         // ← ADD
 $router->post('/reports/{id}/suspend-user',     [ReportsController::class, 'suspendUser']);    // ← ADD
 $router->post('/reports/{id}/delete-target',    [ReportsController::class, 'deleteTarget']);   // ← ADD
+
+
+$router->get ('/fees',                    [FeesController::class, 'index']);
+$router->get ('/fees/{id}',               [FeesController::class, 'show']);
+$router->post('/fees/{id}/mark-paid',     [FeesController::class, 'markPaid']);
+$router->post('/fees/{id}/mark-all-paid', [FeesController::class, 'markAllPaid']);
+
+$router->get('/fees/export.csv', [FeesController::class, 'exportCsv']);
